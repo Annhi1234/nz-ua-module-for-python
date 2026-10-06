@@ -4,7 +4,7 @@ __all__ = (
     "NZError", "APIError", "IncorrectUsername", "IncorrectNickname",
     "IncorrectPassword", "HometaskNotFound", "Unauthorized", "SessionExpired",
     "ServiceUnavailable", "ConnectionTimedOut", "NetworkError",
-    "RateLimited", "InternalServerError", "UnknownError",
+    "RateLimited", "InternalServerError", "UnknownError", "BlockedError",
 )
 
 
@@ -50,6 +50,17 @@ class SessionExpired(Unauthorized):
 
 class NetworkError(NZError):
     """Немає зв'язку з сервером."""
+
+
+class BlockedError(NetworkError):
+    """Захист сервера (Cloudflare «Just a moment...») відхилив запит."""
+
+    def __init__(self, status: int = 403) -> None:
+        super().__init__(
+            f"Сервер nz.ua заблокував запит (захист Cloudflare, HTTP {status}). "
+            "Виконайте `python -m nzua diagnose --save` — воно підбере спосіб, що проходить. "
+            "Також спробуйте вимкнути VPN або змінити мережу.")
+        self.status = status
 
 
 class ConnectionTimedOut(NetworkError):

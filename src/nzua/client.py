@@ -12,17 +12,25 @@ import httpx
 
 from . import models as m
 from .errors import (
-    APIError, ConnectionTimedOut, HometaskNotFound, IncorrectPassword,
+    APIError, BlockedError, ConnectionTimedOut, HometaskNotFound, IncorrectPassword,
     IncorrectUsername, InternalServerError, NetworkError, RateLimited,
     ServiceUnavailable, SessionExpired, Unauthorized, UnknownError,
 )
 from .storage import MemoryTokenStore, ResponseCache, TokenStore
 
-__all__ = ("AsyncNZClient", "BASE_URL")
+__all__ = ("AsyncNZClient", "BASE_URL", "USER_AGENTS")
 
 BASE_URL = "https://api-mobile.nz.ua"
 _V = "/v2"
-_HEADERS = {"User-Agent": "IRC RESTClient", "Accept": "application/json"}
+# Заголовки повторюють офіційні запити мобільного клієнта (як у старій бібліотеці).
+_HEADERS = {"User-Agent": "IRC RESTClient", "Accept": "application/json",
+            "Accept-Charset": "utf-8, *;q=0.8", "Accept-Encoding": "gzip"}
+USER_AGENTS = {
+    "legacy": "IRC RESTClient",
+    "okhttp": "okhttp/4.12.0",
+    "android-chrome": ("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"),
+}
 
 _KNOWN_ERRORS: dict[str, type[APIError]] = {
     "користувач не знайдений": IncorrectUsername,
@@ -30,6 +38,19 @@ _KNOWN_ERRORS: dict[str, type[APIError]] = {
     "завдання не знайдене": HometaskNotFound,
 }
 _Date = str | date | datetime
+
+
+def _is_blocked(resp: httpx.Response) -> bool:
+    """Сторінка-перевірка Cloudflare/WAF замість відповіді API."""
+    if resp.status_code not in (403, 429, 503):
+        return False
+    if resp.headers.get("cf-mitigated"):
+        return True
+    if "html" in resp.headers.get("content-type", "").lower():
+        head = resp.text[:4000].lower()
+        return any(x in head for x in ("just a moment", "cf-chl", "challenge-platform",
+                                       "attention required", "cloudflare"))
+    return False
 
 
 def _check_id(value: int | str, name: str = "id") -> int | str:
@@ -71,6 +92,10 @@ class AsyncNZClient:
         retries: int = 2,
         headers: dict[str, str] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        user_agent: str | None = None,
+        http2: bool = False,
+        proxy: str | None = None,
+        impersonate: str | None = None,
     ) -> None:
         self._tokens = tokens or (m.Tokens(token) if token else None)
         self._store: TokenStore = token_store or MemoryTokenStore()
@@ -78,9 +103,17 @@ class AsyncNZClient:
         self._retries = max(0, retries)
         self._lock = asyncio.Lock()
         self.student: m.Student | None = None
+        ua = USER_AGENTS.get(user_agent or "", user_agent)
+        extra: dict[str, Any] = {}
+        if impersonate and transport is None:
+            from ._curl import CurlTransport  # потрібен `pip install curl_cffi`
+            transport = CurlTransport(impersonate, timeout=timeout, proxy=proxy)
+        elif proxy:
+            extra["proxy"] = proxy
         self._http = httpx.AsyncClient(
-            base_url=base_url, timeout=timeout, transport=transport,
-            headers={**_HEADERS, **(headers or {})}, follow_redirects=True)
+            base_url=base_url, timeout=timeout, transport=transport, http2=http2 and transport is None,
+            headers={**_HEADERS, **({"User-Agent": ua} if ua else {}), **(headers or {})},
+            follow_redirects=True, **extra)
 
     # ── життєвий цикл ──
     async def __aenter__(self) -> "AsyncNZClient":
@@ -122,7 +155,7 @@ class AsyncNZClient:
                 if last:
                     raise NetworkError(str(e) or "network error") from e
             else:
-                if resp.status_code not in (502, 503, 504, 522) or last:
+                if resp.status_code not in (502, 503, 504, 522) or last or _is_blocked(resp):
                     return resp
             await asyncio.sleep(0.5 * 2 ** i)
         raise NetworkError("unreachable")  # pragma: no cover
@@ -130,6 +163,8 @@ class AsyncNZClient:
     @staticmethod
     def _handle(resp: httpx.Response, expect: str) -> Any:
         code = resp.status_code
+        if _is_blocked(resp):
+            raise BlockedError(code)
         if code == 204:
             return None
         if code == 401:
@@ -227,12 +262,22 @@ class AsyncNZClient:
         return parser(data)
 
     # ── сервісні ──
+    async def probe(self) -> str:
+        """Один пробний запит без авторизації: 'ok', 'blocked', 'http 404' або 'network: …'."""
+        try:
+            resp = await self._send("GET", _V + "/user/test", body=None, params=None, auth=False, retry=False)
+        except NetworkError as e:
+            return f"network: {e}"
+        if _is_blocked(resp):
+            return "blocked"
+        return "ok" if resp.status_code == 200 else f"http {resp.status_code}"
+
     async def ping(self) -> bool:
         """Перевірка доступності API (без авторизації)."""
         try:
             await self._call("GET", "/user/test", auth=False, retry=False)
             return True
-        except (NetworkError, UnknownError, InternalServerError):
+        except (NetworkError, UnknownError, InternalServerError):  # BlockedError ⊂ NetworkError
             return False
 
     # ── авторизація ──

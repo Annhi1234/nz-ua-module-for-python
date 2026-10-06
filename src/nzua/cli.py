@@ -16,6 +16,7 @@ from typing import Any, Callable
 from . import __version__, analytics, charts
 from .client import AsyncNZClient
 from .errors import NZError, Unauthorized
+from .netconfig import load_network_options, save_network_options
 from .storage import FileCache, FileTokenStore
 
 Cols = list[tuple[str, str]]  # (ключ для json/csv, заголовок таблиці)
@@ -33,9 +34,17 @@ def default_home() -> Path:
     return Path(os.getenv("NZUA_HOME") or Path.home() / ".nzua")
 
 
-def make_client(home: Path, no_cache: bool) -> AsyncNZClient:
+def make_client(home: Path, no_cache: bool, **net: Any) -> AsyncNZClient:
+    """Мережеві параметри: збережені `nzua diagnose --save`, поверх них — прапорці командного рядка."""
     return AsyncNZClient(token_store=FileTokenStore(home / "tokens.json"),
-                         cache=None if no_cache else FileCache(home / "cache.json"))
+                         cache=None if no_cache else FileCache(home / "cache.json"),
+                         **{**load_network_options(home), **net})
+
+
+def net_opts(a: argparse.Namespace) -> dict[str, Any]:
+    opts = {"user_agent": a.user_agent, "impersonate": a.impersonate, "proxy": a.proxy,
+            "http2": a.http2 or None}
+    return {k: v for k, v in opts.items() if v}
 
 
 # ───────────── період ─────────────
@@ -209,6 +218,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--home", type=Path, default=None, help="каталог сесії та кешу (за замовчуванням ~/.nzua)")
     p.add_argument("-f", "--format", choices=("table", "json", "csv"), default="table", help="формат виводу")
     p.add_argument("--no-cache", action="store_true", help="не використовувати офлайн-кеш")
+    p.add_argument("--user-agent", help="legacy | okhttp | android-chrome або власний рядок")
+    p.add_argument("--impersonate", nargs="?", const="chrome", metavar="БРАУЗЕР",
+                   help="TLS-відбиток браузера (потрібен curl_cffi), типово chrome")
+    p.add_argument("--http2", action="store_true", help="використовувати HTTP/2 (потрібен пакет h2)")
+    p.add_argument("--proxy", help="проксі, напр. http://127.0.0.1:8080")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="команда")
 
     period = argparse.ArgumentParser(add_help=False)
@@ -221,6 +235,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.choices["login"].add_argument("-p", "--password", help="або змінна NZUA_PASSWORD")
     sub.add_parser("logout", help="вийти й видалити сесію та кеш")
     sub.add_parser("status", help="перевірити сервер і сесію")
+    sub.add_parser("diagnose", help="підібрати спосіб доступу, якщо сервер блокує запити (Cloudflare)") \
+        .add_argument("--save", action="store_true", help="запам'ятати робочий спосіб")
     g = sub.add_parser("grades", parents=[period], help="оцінки за період")
     g.add_argument("--subject", help="частина назви предмета")
     sub.add_parser("performance", parents=[period], help="успішність по предметах")
@@ -257,10 +273,61 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# ───────────── діагностика доступу ─────────────
+CANDIDATES: list[tuple[str, dict]] = [
+    ("стандартні заголовки (як у старій бібліотеці)", {}),
+    ("HTTP/2", {"http2": True}),
+    ("User-Agent: okhttp", {"user_agent": "okhttp"}),
+    ("User-Agent: Android Chrome", {"user_agent": "android-chrome"}),
+    ("TLS-відбиток Chrome (curl_cffi)", {"impersonate": "chrome"}),
+]
+
+
+async def run_diagnose(a: argparse.Namespace, factory: Callable[..., AsyncNZClient] = AsyncNZClient) -> int:
+    home = a.home or default_home()
+    base = {"proxy": a.proxy} if a.proxy else {}
+    print("Перевірка доступу до api-mobile.nz.ua\n")
+    winner: tuple[str, dict] | None = None
+    for title, opts in CANDIDATES:
+        merged = {**base, **opts}
+        try:
+            nz = factory(**merged)
+        except ImportError as e:
+            hint = "pip install curl_cffi" if "curl_cffi" in str(e) else "pip install h2"
+            print(f"  –  {title}: пропущено ({hint})")
+            continue
+        try:
+            res = await nz.probe()
+        finally:
+            await nz.aclose()
+        label = {"ok": "✔ працює", "blocked": "✖ заблоковано Cloudflare"}.get(res, f"✖ {res}")
+        print(f"  {label[0]}  {title}: {label[2:]}")
+        if res == "ok" and winner is None:
+            winner = (title, merged)
+    print()
+    if winner is None:
+        print("Жоден спосіб не пройшов. Спробуйте: вимкнути VPN/проксі, інша мережа (наприклад, "
+              "точка доступу з телефона), повторити пізніше. Якщо `curl_cffi` пропущено: "
+              "pip install curl_cffi і запустіть знову.")
+        return 1
+    title, opts = winner
+    if not {k: v for k, v in opts.items() if k != "proxy"}:
+        print("Стандартний доступ працює: проблема не в блокуванні. Якщо помилка повторюється, "
+              "ймовірно, блокуються лише POST-запити входу або ваша IP зараз у «чорному списку».")
+    elif a.save:
+        path = save_network_options(opts, home)
+        print(f"Підійшов спосіб «{title}». Збережено в {path}; `nzua` використовує його автоматично.")
+        print("У власному коді: NZClient(**load_network_options())")
+    else:
+        flags = " ".join(f"--{k.replace('_', '-')}" + ("" if v is True else f" {v}") for k, v in opts.items())
+        print(f"Підійшов спосіб «{title}». Додайте --save, щоб запам'ятати, або вказуйте {flags}.")
+    return 0
+
+
 # ───────────── запуск ─────────────
 async def _run(a, factory) -> int:
     home = a.home or default_home()
-    nz = factory(home, a.no_cache)
+    nz = factory(home, a.no_cache, **net_opts(a))
     try:
         if a.cmd == "login":
             user = a.username or input("Логін: ")
@@ -286,13 +353,16 @@ async def _run(a, factory) -> int:
         await nz.aclose()
 
 
-def main(argv: list[str] | None = None, *, client_factory: Callable = make_client) -> int:
+def main(argv: list[str] | None = None, *, client_factory: Callable = make_client,
+         probe_factory: Callable[..., AsyncNZClient] = AsyncNZClient) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
         except (AttributeError, ValueError):
             pass
     a = build_parser().parse_args(argv)
+    if a.cmd == "diagnose":
+        return asyncio.run(run_diagnose(a, probe_factory))
     if a.cmd == "need":
         try:
             marks = [int(x) for x in a.marks.replace(" ", "").split(",") if x]

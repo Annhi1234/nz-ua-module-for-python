@@ -77,6 +77,7 @@ Sync (ті самі методи, без `await`):
     nzua performance --period year         # успішність
     nzua chart averages -o avg.svg --width 900 --height 450 --colors sunset
     nzua need --marks 8,9,10 --target 10.5 # скільки «12» треба для середнього
+    nzua diagnose --save                   # якщо 403 / «Just a moment...» (Cloudflare)
 
 Усі команди: `nzua --help`, детально — у [docs/GUIDE.md](docs/GUIDE.md). Формати виводу: `-f table|json|csv`.
 

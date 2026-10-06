@@ -71,7 +71,7 @@ def handler(req):
 
 
 def factory(tokens=Tokens("A")):
-    return lambda home, no_cache: AsyncNZClient(
+    return lambda home, no_cache, **kw: AsyncNZClient(
         tokens=tokens, token_store=MemoryTokenStore(), transport=httpx.MockTransport(handler), retries=0)
 
 

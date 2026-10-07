@@ -10,13 +10,14 @@
 [9. Параметри клієнта](#9-параметри-клієнта) · [10. Графіки](#10-графіки) ·
 [11. Аналітика](#11-аналітика) · [12. Командний рядок](#12-командний-рядок) ·
 [13. Android-застосунок](#13-android-застосунок) · [14. Тестування](#14-тестування-власного-коду) ·
-[15. Типові проблеми](#15-типові-проблеми) · [16. Міграція зі старої бібліотеки](#16-міграція-зі-старої-бібліотеки)
+[15. Типові проблеми](#15-типові-проблеми) · [16. Міграція зі старої бібліотеки](#16-міграція-зі-старої-бібліотеки) ·
+[17. Конструктор інтерфейсу nzua.ui](#17-конструктор-інтерфейсу-nzuaui)
 
 ---
 
 ## 1. Встановлення
 
-Потрібен Python 3.10 або новіший. Єдина залежність — `httpx`.
+Потрібен Python 3.10 або новіший. Залежності: `httpx` і `curl_cffi` (TLS-відбиток Chrome, див. розділ 9).
 
     pip install -e .            # з каталогу проєкту
     pip install -e ".[dev]"     # разом із pytest для тестів
@@ -233,9 +234,9 @@ if data.from_cache:
 | `user_agent` | `"legacy"` (типово, `IRC RESTClient`), `"okhttp"`, `"android-chrome"` або власний рядок |
 | `http2` | `True` — запити по HTTP/2 (потрібен `pip install h2`) |
 | `proxy` | адреса проксі, напр. `"http://127.0.0.1:8080"` |
-| `impersonate` | `"chrome"` та інші — TLS-відбиток браузера (потрібен `pip install curl_cffi`; на Android не працює) |
+| `impersonate` | **Типово `"auto"`: TLS-відбиток Chrome через `curl_cffi`** (Cloudflare пропускає такі запити). Якщо `curl_cffi` не встановлено — один раз з'являється `RuntimeWarning` і клієнт працює на звичайному httpx. Можна вказати іншу назву (`"safari17_0"`; без пакета — `ImportError`) або `False` — вимкнути відбиток. `user_agent` при відбитку ігнорується: його підставляє сам відбиток. На Android `curl_cffi` є серед бінарних пакетів Flet |
 
-Збережені `nzua diagnose --save` параметри підхоплюються так: `NZClient(**load_network_options())`.
+Збережені `nzua diagnose --save` параметри (у т.ч. `impersonate: false`) підхоплюються так: `NZClient(**load_network_options())`.
 
 Sync-клієнт `NZClient(...)` приймає ті самі параметри.
 
@@ -372,8 +373,12 @@ Actions → Build APK → Run workflow. Через 10–20 хвилин зава
 середні по предметах, пропуски; дотик до предмета відкриває його оцінки), **Сповіщення**, **Профіль**.
 Дотик до домашнього завдання відкриває його текст і поле відповіді.
 
-**Налаштування графіка** (вкладка «Профіль»): набір кольорів, висота (160–420), підписи значень.
-Зберігаються у файлі `settings.json` у каталозі застосунку.
+**Налаштування** (вкладка «Профіль»): кольори графіка, висота (160–420), підписи значень, оцінки таблицею чи
+картками, темна тема. Зберігаються у `ui.json` у каталозі застосунку.
+
+Увесь інтерфейс застосунку (`app/src/main.py` — кілька рядків) живе в бібліотеці — `nzua.ui.diary.DiaryApp`.
+Той самий щоденник запускається й на комп'ютері: `nzua gui` (Tkinter / PyQt5 / Flet), `nzua gui --demo` — на
+вигаданих даних. Про власний інтерфейс — розділ 17.
 
 Токени зберігаються в Android Keystore, пароль не зберігається. Без інтернету показуються останні збережені
 дані з позначкою про це.
@@ -403,9 +408,10 @@ nz = AsyncNZClient(tokens=Tokens("test"), transport=httpx.MockTransport(handler)
 «підозріла» мережа). Порядок дій:
 
 1. Вимкніть VPN/проксі й повторіть.
-2. Виконайте `python -m nzua diagnose --save`. Команда по черзі пробує кілька способів (заголовки,
-   HTTP/2, інші User-Agent, TLS-відбиток Chrome) і запам'ятовує той, що проходить.
-3. Для способу «TLS-відбиток Chrome» потрібен пакет: `pip install curl_cffi` (і `pip install h2` для HTTP/2).
+2. Переконайтеся, що встановлено `curl_cffi` (`pip install curl_cffi`): без нього TLS-відбиток Chrome — типовий
+   режим — вимкнено, і з'являється попередження. Далі виконайте `python -m nzua diagnose --save`: команда по
+   черзі пробує TLS-відбиток Chrome, звичайний httpx, HTTP/2 і інші User-Agent та запам'ятовує, що проходить.
+3. Для HTTP/2 потрібен ще `pip install h2`.
 4. У власному коді використовуйте збережене: `NZClient(**load_network_options())`.
 5. Якщо не проходить жоден спосіб, спробуйте іншу мережу (наприклад, точку доступу з телефона) або пізніше.
 
@@ -439,3 +445,114 @@ API неофіційне, сервер може змінитись без поп
 | `delete_hometask_file(file_id)` | `answer_hometask(id, text, delete_file_ids=[file_id])` |
 | `IncorrectNickname` | `IncorrectUsername` (старе ім'я залишилось синонімом) |
 | `get_schedule`, `get_timetable`, `get_student_performance`, `get_subject_performance`, `get_hometask` | ті самі назви, нові параметри дат за замовчуванням |
+
+---
+
+## 17. Конструктор інтерфейсу nzua.ui
+
+`nzua.ui` — шар для побудови вікон і екранів телефону **без прив'язки до графічної бібліотеки**: ви описуєте
+інтерфейс віджетами (`Text`, `Button`, `Table`, `Row`, `Column`, `Card`, `Chip`, `Input`…), а один із бекендів
+малює його в **Tkinter**, **PyQt5** або **Flet** (на телефоні — Flet). Також є експорт у HTML і текст та
+`headless`-бекенд для автотестів.
+
+```python
+from nzua.ui import App, Screen, Column, Row, Text, Button, Table, Col, Cell, Chip, Style
+
+def build(app):                        # викликається при кожному app.refresh() / app.update()
+    return Screen(Column([
+        Text("Оцінки", cls="h2"),
+        Table([Col("Предмет", flex=3), Col("Бал", width=70, align="center")],
+              [["Алгебра", Chip(11, "good")], ["Фізика", Cell(5, color="bad", bold=True)]],
+              on_row_click=lambda i: app.toast(f"рядок {i}")),
+        Row([Button("+1", lambda: app.update(n=app.state.get("n", 0) + 1), variant="primary"),
+             Text(f"n = {app.state.get('n', 0)}")], gap=8),
+    ], gap=12))
+
+App(build, backend="tk").run()          # "tk" | "qt" | "flet" | "headless"; "auto" обирає наявну
+```
+
+### Віджети
+
+| Віджет | Призначення |
+|---|---|
+| `Text(text, cls=…, on_click=…)` | текст; `selectable=True` — виділяється |
+| `Button(text, on_click, variant="default"/"primary"/"outline"/"text", icon="refresh")` | кнопка |
+| `Chip(text, color)` | кольоровий бейдж (оцінка); `color`: `good`/`mid`/`bad`/`ink`/`muted` або `#hex` |
+| `Row`, `Column`, `Card` | розкладка: `gap`, `align`, `justify`, `wrap`, `scroll`, `expand`; `Card` — картка з «полем зошита» |
+| `Table(columns, rows, zebra, on_row_click)` | таблиця; колонка `Col(title, width/flex, align)`; клітинка — значення, `Cell(text, color=…, bg=…, bold=…, on_click=…)` або будь-який віджет |
+| `Chart(labels, values, type="bar"/"line", colors, show_values)` | графік (на Tk малюється на Canvas, інде — SVG) |
+| `Input(name, label, password, multiline, on_submit)`, `Switch`, `Dropdown`, `Slider` | поля; значення — в `app.values[name]` |
+| `Progress`, `Divider`, `Spacer`, `Image` | індикатор, лінія, відступ, SVG/зображення |
+| `NavBar(items, selected, on_change)` | нижня панель вкладок (телефон) |
+| `Screen(body, nav=…)` | корінь: тіло з прокруткою + панель вкладок |
+| `Dialog(title, content, actions)` | `app.show_dialog(...)` / `app.close_dialog()` |
+
+Обробники подій — звичайні функції без аргументів (для полів — з одним: нове значення) або `async def`.
+Помилка в обробнику не валить вікно: вона показується тостом.
+
+### Стилі й теми
+
+Стиль задається так само, як у CSS: **вид віджета → клас (`cls="h2 muted"`) → власний `Style`**. Будь-яке поле можна
+передати прямо у віджет: `Row(gap=8, padding=12, bg="#fff", radius=10)`.
+
+```python
+Text("Привіт", cls="h1", style=Style(color="#c00", text_align="center"))
+Button("Ок", variant="primary", radius=20)
+```
+
+Поля `Style`: `color, bg, font_size, bold, italic, text_align, align, justify, padding, margin, radius, border,
+border_width, border_left, width, height, expand, gap, wrap`. Відступи — число, `(верт, гор)` або
+`(верх, право, низ, ліво)`. Кольори — `#hex` або ключ палітри (`ink`, `good`, `muted`…).
+
+Тема — палітра + стилі: готові `NOTEBOOK` (світла) і `DARK`; власну роблять так:
+
+```python
+THEME = NOTEBOOK.with_(palette={"ink": "#7B2CBF"},
+                       styles={"card": Style(radius=20),       # за видом віджета
+                               ".h2": Style(font_size=26)})    # за класом cls="h2"
+App(build, theme=THEME)
+```
+
+Класи теми: `h1 h2 h3 title muted small big error good bad banner table-head table-cell table-zebra`.
+
+### Готові блоки для даних nzua (`nzua.ui.screens`)
+
+`diary_view`, `timetable_view`, `grades_table` (дата · предмет · оцінка), `journal_table` (предмети × дні),
+`performance_table`, `performance_view`, `averages_chart_widget`, `subject_view`, `notifications_view`,
+`profile_view`, `login_form`, `week_bar`, `grade_chip`. Вони повертають звичайні віджети, тож їх можна вкладати
+в `Column`/`Card` і змінювати стилі: `grades_table(schedule, zebra=False, style=Style(radius=0))`.
+
+### Запити без «зависань» вікна
+
+```python
+app.task(client.get_schedule(), on_done=lambda s: app.update(schedule=s))
+```
+
+Запит іде поза потоком інтерфейсу, `on_done` викликається вже в ньому, потім інтерфейс перемальовується.
+Помилка → тост (або `app.on_error`); `Unauthorized` → `app.on_unauthorized`. У Flet запити виконуються в циклі
+подій самого Flet (потрібно для `flet-secure-storage`).
+
+### Готовий щоденник і запуск
+
+    nzua gui --backend tk          # або qt / flet; --demo — вигадані дані без входу
+    python -m nzua.ui --demo --dark
+
+У коді: `DiaryApp(AsyncNZClient(...), backend="qt").run()` (див. `app/src/main.py` для Flet, `examples/custom_ui.py`
+— власний екран із таблицею й темою).
+
+### Попередній перегляд і тести
+
+```python
+from nzua.ui import to_html, to_text, save_html
+save_html(app.root, "preview.html")      # відкрийте в браузері (ширина телефона)
+
+app = App(build, backend="headless"); app.run()
+app.backend.click("save"); app.backend.type("username", "ivan"); print(app.backend.texts())
+```
+
+### Обмеження
+
+- Tkinter не вміє заокруглення (`radius` ігнорується) і SVG; Flet-кнопки слідують темі Material, а не `Style`.
+- Кожне перемальовування перебудовує екран повністю (просто й надійно для щоденника; для дуже довгих списків — повільніше).
+- Бекенди Tk/PyQt5/Flet перевірені лише автоматично на заглушках бібліотек (у середовищі розробки їх не було);
+  запуск на реальних вікнах і телефоні — за вами.

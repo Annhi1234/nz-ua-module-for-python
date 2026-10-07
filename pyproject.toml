@@ -9,7 +9,7 @@ description = "Неофіційна async/sync бібліотека для nz.ua
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = ["httpx>=0.27"]
+dependencies = ["httpx>=0.27", "curl_cffi>=0.7"]
 
 [project.scripts]
 nzua = "nzua.cli:main"
@@ -17,7 +17,8 @@ nzua = "nzua.cli:main"
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "curl_cffi>=0.7", "h2>=4"]
 http2 = ["h2>=4"]
-impersonate = ["curl_cffi>=0.7"]
+qt = ["PyQt5>=5.15"]
+flet = ["flet>=1.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import warnings
 from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
@@ -14,11 +15,11 @@ from . import models as m
 from .errors import (
     APIError, BlockedError, ConnectionTimedOut, HometaskNotFound, IncorrectPassword,
     IncorrectUsername, InternalServerError, NetworkError, RateLimited,
-    ServiceUnavailable, SessionExpired, Unauthorized, UnknownError,
+    ServiceUnavailable, SessionExpired, Unauthorized, UnknownError, NZError,
 )
 from .storage import MemoryTokenStore, ResponseCache, TokenStore
 
-__all__ = ("AsyncNZClient", "BASE_URL", "USER_AGENTS")
+__all__ = ("AsyncNZClient", "BASE_URL", "USER_AGENTS", "DEFAULT_IMPERSONATE")
 
 BASE_URL = "https://api-mobile.nz.ua"
 _V = "/v2"
@@ -38,6 +39,33 @@ _KNOWN_ERRORS: dict[str, type[APIError]] = {
     "завдання не знайдене": HometaskNotFound,
 }
 _Date = str | date | datetime
+DEFAULT_IMPERSONATE = "chrome"
+_warned_no_curl = False
+
+
+def _make_transport(impersonate: str | bool | None, timeout: float, proxy: str | None):
+    """TLS-відбиток браузера (curl_cffi) — типовий режим.
+
+    "auto"/True → Chrome; якщо curl_cffi не встановлено, один раз попереджаємо й працюємо
+    на звичайному httpx. Явна назва ("chrome", "safari17_0"…) без curl_cffi — помилка.
+    None/False/"" — вимкнути відбиток.
+    """
+    global _warned_no_curl
+    if impersonate in (None, False, ""):
+        return None
+    name = DEFAULT_IMPERSONATE if impersonate in ("auto", True) else str(impersonate)
+    try:
+        from ._curl import CurlTransport  # потрібен `pip install curl_cffi`
+        return CurlTransport(name, timeout=timeout, proxy=proxy)
+    except ImportError:
+        if impersonate not in ("auto", True):
+            raise
+        if not _warned_no_curl:
+            _warned_no_curl = True
+            warnings.warn(
+                "curl_cffi не встановлено: працюю без TLS-відбитка Chrome, Cloudflare може "
+                "блокувати запити. Встановіть: pip install curl_cffi", RuntimeWarning, stacklevel=3)
+        return None
 
 
 def _is_blocked(resp: httpx.Response) -> bool:
@@ -65,6 +93,10 @@ def _period(start: _Date | None, end: _Date | None) -> dict[str, str]:
     s = start if start is not None else today.replace(day=1)
     e = end if end is not None else today
     s, e = (x.date() if isinstance(x, datetime) else x for x in (s, e))
+    try:  # рядки перевіряємо й нормалізуємо ("2026-1-5" відхиляється, "2026-01-05" ок)
+        s, e = (date.fromisoformat(x) if isinstance(x, str) else x for x in (s, e))
+    except ValueError as exc:
+        raise ValueError(f"некоректна дата (очікується РРРР-ММ-ДД): {exc}") from exc
     s, e = str(s), str(e)
     if s > e:
         raise ValueError("start_date пізніше за end_date")
@@ -95,7 +127,7 @@ class AsyncNZClient:
         user_agent: str | None = None,
         http2: bool = False,
         proxy: str | None = None,
-        impersonate: str | None = None,
+        impersonate: str | bool | None = "auto",
     ) -> None:
         self._tokens = tokens or (m.Tokens(token) if token else None)
         self._store: TokenStore = token_store or MemoryTokenStore()
@@ -105,10 +137,9 @@ class AsyncNZClient:
         self.student: m.Student | None = None
         ua = USER_AGENTS.get(user_agent or "", user_agent)
         extra: dict[str, Any] = {}
-        if impersonate and transport is None:
-            from ._curl import CurlTransport  # потрібен `pip install curl_cffi`
-            transport = CurlTransport(impersonate, timeout=timeout, proxy=proxy)
-        elif proxy:
+        if transport is None:
+            transport = _make_transport(impersonate, timeout, proxy)
+        if transport is None and proxy:
             extra["proxy"] = proxy
         self._http = httpx.AsyncClient(
             base_url=base_url, timeout=timeout, transport=transport, http2=http2 and transport is None,
@@ -201,6 +232,7 @@ class AsyncNZClient:
             await self._refresh(failed=self._tokens.access_token if self._tokens else None)
             resp = await self._send(method, _V + path, body=body, params=params, auth=auth, retry=retry)
             if resp.status_code == 401:
+                await self._drop_session()
                 raise SessionExpired
         return self._handle(resp, expect)
 
@@ -252,7 +284,7 @@ class AsyncNZClient:
         key = f"{path}|{json.dumps(body, sort_keys=True)}"
         try:
             data = await self._call("POST", path, body=body)
-        except NetworkError:
+        except (NetworkError, RateLimited, InternalServerError):
             hit = await self._cache.get(key) if self._cache else None
             if hit is None:
                 raise
@@ -277,13 +309,17 @@ class AsyncNZClient:
         try:
             await self._call("GET", "/user/test", auth=False, retry=False)
             return True
-        except (NetworkError, UnknownError, InternalServerError):  # BlockedError ⊂ NetworkError
+        except (NetworkError, UnknownError, InternalServerError, RateLimited):  # BlockedError ⊂ NetworkError
             return False
 
     # ── авторизація ──
     async def login(self, username: str, password: str, push_token: str = "") -> m.Student:
         data = await self._call("POST", "/user/login", auth=False, retry=False, body={
             "username": username, "password": password, "exponentPushToken": push_token})
+        if not isinstance(data, dict) or not data.get("access_token"):
+            raise UnknownError("Сервер не повернув токен входу.")
+        if self._cache:
+            await self._cache.clear()  # дані попереднього акаунта не мають потрапити в новий
         await self._set_tokens(m.Tokens(
             data["access_token"], data.get("refresh_token"), self._int(data.get("expires_token"))))
         self.student = m.Student.from_api(data)
@@ -348,22 +384,28 @@ class AsyncNZClient:
         return data
 
     # ── сповіщення ──
+    @staticmethod
+    def _items(data: Any) -> list[dict]:
+        """Список записів із {"data": [...]} або з голого списку."""
+        if isinstance(data, dict):
+            data = data.get("data", [])
+        return [x for x in data if isinstance(x, dict)] if isinstance(data, list) else []
+
     async def get_notifications(self) -> list[m.Notification]:
-        data = await self._call("GET", "/notification/")
-        return [m.Notification.from_api(x) for x in data.get("data", []) if isinstance(x, dict)]
+        return [m.Notification.from_api(x) for x in self._items(await self._call("GET", "/notification/"))]
 
     async def get_unread_count(self) -> int:
         data = await self._call("GET", "/notification/unread-qty")
-        return self._int(data.get("qty")) or 0
+        return (self._int(data.get("qty")) if isinstance(data, dict) else self._int(data)) or 0
 
     # ── вчителям та службові ──
     async def get_mark_values(self) -> list[m.MarkValue]:
         data = await self._call("POST", "/personnel-journal/mark-list", body={})
-        return [m.MarkValue.from_api(x) for x in data.get("data", []) if isinstance(x, dict)]
+        return [m.MarkValue.from_api(x) for x in self._items(data)]
 
     async def create_temporary_link(self, url: str) -> str:
         data = await self._call("POST", "/link/generate-temporary-link", body={"url": url}, retry=False)
-        return data.get("response", "")
+        return data.get("response", "") if isinstance(data, dict) else str(data or "")
 
     async def get_temporary_link(self, link_hash: str) -> str:
         return await self._call("GET", "/link/get-temporary-link",

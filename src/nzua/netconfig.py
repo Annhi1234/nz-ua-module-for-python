@@ -21,11 +21,14 @@ def load_network_options(home: str | os.PathLike | None = None) -> dict:
         raw = json.loads(_file(home).read_text("utf-8"))
     except (OSError, ValueError):
         return {}
-    return {k: raw[k] for k in _KEYS if raw.get(k)}
+    if not isinstance(raw, dict):
+        return {}
+    return {k: raw[k] for k in _KEYS if raw.get(k) or (k == "impersonate" and raw.get(k) is False)}
 
 
 def save_network_options(options: dict, home: str | os.PathLike | None = None) -> Path:
     p = _file(home)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({k: options[k] for k in _KEYS if options.get(k)}, ensure_ascii=False), "utf-8")
+    keep = {k: options[k] for k in _KEYS if options.get(k) or (k == "impersonate" and options.get(k) is False)}
+    p.write_text(json.dumps(keep, ensure_ascii=False), "utf-8")
     return p

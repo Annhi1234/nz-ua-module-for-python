@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import csv
 import getpass
+import importlib.util
 import json
 import os
 import sys
@@ -44,7 +45,9 @@ def make_client(home: Path, no_cache: bool, **net: Any) -> AsyncNZClient:
 def net_opts(a: argparse.Namespace) -> dict[str, Any]:
     opts = {"user_agent": a.user_agent, "impersonate": a.impersonate, "proxy": a.proxy,
             "http2": a.http2 or None}
-    return {k: v for k, v in opts.items() if v}
+    if a.no_tls:
+        opts["impersonate"] = False
+    return {k: v for k, v in opts.items() if v or v is False}
 
 
 # ───────────── період ─────────────
@@ -220,7 +223,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-cache", action="store_true", help="не використовувати офлайн-кеш")
     p.add_argument("--user-agent", help="legacy | okhttp | android-chrome або власний рядок")
     p.add_argument("--impersonate", nargs="?", const="chrome", metavar="БРАУЗЕР",
-                   help="TLS-відбиток браузера (потрібен curl_cffi), типово chrome")
+                   help="TLS-відбиток браузера (curl_cffi); типово вже chrome, тут можна вказати інший")
+    p.add_argument("--no-tls", action="store_true", help="вимкнути TLS-відбиток (звичайний httpx)")
     p.add_argument("--http2", action="store_true", help="використовувати HTTP/2 (потрібен пакет h2)")
     p.add_argument("--proxy", help="проксі, напр. http://127.0.0.1:8080")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="команда")
@@ -251,6 +255,9 @@ def build_parser() -> argparse.ArgumentParser:
     ans.add_argument("hometask_id")
     ans.add_argument("text")
     sub.add_parser("notifications", help="сповіщення")
+    gui = sub.add_parser("gui", help="графічний застосунок (Tkinter / PyQt5 / Flet)")
+    gui.add_argument("--backend", default="auto", choices=("auto", "tk", "qt", "flet"))
+    gui.add_argument("--demo", action="store_true", help="вигадані дані без входу")
 
     c = sub.add_parser("chart", parents=[period], help="намалювати графік у SVG")
     c.add_argument("kind", choices=("averages", "marks", "distribution"),
@@ -274,12 +281,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # ───────────── діагностика доступу ─────────────
+_PLAIN = {"impersonate": False}  # без TLS-відбитка
 CANDIDATES: list[tuple[str, dict]] = [
-    ("стандартні заголовки (як у старій бібліотеці)", {}),
-    ("HTTP/2", {"http2": True}),
-    ("User-Agent: okhttp", {"user_agent": "okhttp"}),
-    ("User-Agent: Android Chrome", {"user_agent": "android-chrome"}),
-    ("TLS-відбиток Chrome (curl_cffi)", {"impersonate": "chrome"}),
+    ("TLS-відбиток Chrome (curl_cffi, типовий режим)", {}),
+    ("звичайний httpx, стандартні заголовки", dict(_PLAIN)),
+    ("звичайний httpx, HTTP/2", {**_PLAIN, "http2": True}),
+    ("звичайний httpx, User-Agent: okhttp", {**_PLAIN, "user_agent": "okhttp"}),
+    ("звичайний httpx, User-Agent: Android Chrome", {**_PLAIN, "user_agent": "android-chrome"}),
 ]
 
 
@@ -290,6 +298,9 @@ async def run_diagnose(a: argparse.Namespace, factory: Callable[..., AsyncNZClie
     winner: tuple[str, dict] | None = None
     for title, opts in CANDIDATES:
         merged = {**base, **opts}
+        if not opts and importlib.util.find_spec("curl_cffi") is None and factory is AsyncNZClient:
+            print(f"  –  {title}: пропущено (pip install curl_cffi)")
+            continue
         try:
             nz = factory(**merged)
         except ImportError as e:
@@ -363,6 +374,10 @@ def main(argv: list[str] | None = None, *, client_factory: Callable = make_clien
     a = build_parser().parse_args(argv)
     if a.cmd == "diagnose":
         return asyncio.run(run_diagnose(a, probe_factory))
+    if a.cmd == "gui":
+        from .ui.__main__ import main as gui_main
+        return gui_main(["--backend", a.backend, *(["--demo"] if a.demo else []),
+                         *(["--home", str(a.home)] if a.home else [])])
     if a.cmd == "need":
         try:
             marks = [int(x) for x in a.marks.replace(" ", "").split(",") if x]

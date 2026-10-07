@@ -103,6 +103,8 @@ def test_network_options_roundtrip(tmp_path):
     assert load_network_options(tmp_path) == {}
     save_network_options({"user_agent": "okhttp", "http2": False, "junk": 1}, tmp_path)
     assert load_network_options(tmp_path) == {"user_agent": "okhttp"}
+    save_network_options({"impersonate": False}, tmp_path)  # явне вимкнення TLS-відбитка зберігається
+    assert load_network_options(tmp_path) == {"impersonate": False}
 
 
 def test_cli_diagnose_finds_and_saves_working_option(tmp_path, capsys):
@@ -113,7 +115,7 @@ def test_cli_diagnose_finds_and_saves_working_option(tmp_path, capsys):
     assert main(["--home", str(tmp_path), "diagnose", "--save"], probe_factory=factory) == 0
     out = capsys.readouterr().out
     assert "заблоковано Cloudflare" in out and "okhttp" in out
-    assert load_network_options(tmp_path) == {"user_agent": "okhttp"}
+    assert load_network_options(tmp_path) == {"impersonate": False, "user_agent": "okhttp"}
 
 
 def test_cli_diagnose_nothing_works(tmp_path, capsys):
@@ -155,3 +157,27 @@ async def test_curl_transport_against_local_server():
         await nz.aclose()
     finally:
         srv.shutdown()
+
+
+def test_tls_default_falls_back_with_warning_and_explicit_raises(monkeypatch):
+    import builtins
+    import warnings
+    import nzua.client as c
+
+    real = builtins.__import__
+
+    def fake(name, *a, **k):
+        if name.startswith("curl_cffi"):
+            raise ImportError("no curl")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+    monkeypatch.setattr(c, "_warned_no_curl", False)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        nz = AsyncNZClient()  # типовий режим: попередження, але працює
+        nz2 = AsyncNZClient()  # друге попередження не дублюється
+    assert [x.category for x in w] == [RuntimeWarning]
+    with pytest.raises(ImportError):
+        AsyncNZClient(impersonate="chrome")  # явний запит без curl_cffi — помилка
+    AsyncNZClient(impersonate=False)  # вимкнено свідомо — тиша

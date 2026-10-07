@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from flet_secure_storage import SecureStorage
@@ -41,33 +40,3 @@ def data_dir() -> Path:
     p = Path(base)
     p.mkdir(parents=True, exist_ok=True)
     return p
-
-
-PALETTES = {"scale": "За оцінкою", "ink": "Синя", "ocean": "Океан", "forest": "Ліс",
-            "sunset": "Захід", "mono": "Графіт"}
-
-
-@dataclass
-class Settings:
-    """Вигляд графіка; зберігається у settings.json поруч із кешем."""
-    palette: str = "scale"
-    chart_height: int = 260
-    show_values: bool = True
-
-    @classmethod
-    def load(cls) -> "Settings":
-        try:
-            raw = json.loads((data_dir() / "settings.json").read_text("utf-8"))
-            s = cls(**{k: raw[k] for k in ("palette", "chart_height", "show_values") if k in raw})
-        except (OSError, ValueError, TypeError):
-            return cls()
-        if s.palette not in PALETTES:
-            s.palette = "scale"
-        s.chart_height = min(max(int(s.chart_height), 160), 420)
-        return s
-
-    def save(self) -> None:
-        try:
-            (data_dir() / "settings.json").write_text(json.dumps(asdict(self)), "utf-8")
-        except OSError:
-            pass

@@ -45,7 +45,10 @@ class Tokens:
     expires_at: int | None = None  # epoch, секунди
 
     def is_expired(self, skew: int = 60) -> bool:
-        return self.expires_at is not None and _time.time() >= self.expires_at - skew
+        if self.expires_at is None:
+            return False
+        at = self.expires_at / 1000 if self.expires_at > 10**11 else self.expires_at  # мс → с
+        return _time.time() >= at - skew
 
     def to_dict(self) -> dict:
         return {"access_token": self.access_token,

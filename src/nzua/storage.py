@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -10,6 +11,27 @@ from .models import Tokens
 
 __all__ = ("TokenStore", "MemoryTokenStore", "FileTokenStore",
            "ResponseCache", "MemoryCache", "FileCache")
+
+
+def _atomic_write(path: Path, text: str, mode: int | None = None) -> None:
+    """Запис через тимчасовий файл: обрив посеред запису не псує наявний файл."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        if mode is not None:
+            try:
+                os.chmod(tmp, mode)
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 class TokenStore(Protocol):
@@ -41,16 +63,11 @@ class FileTokenStore:
     async def load(self) -> Tokens | None:
         try:
             return Tokens.from_dict(json.loads(self.path.read_text("utf-8")))
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return None
 
     async def save(self, tokens: Tokens) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(tokens.to_dict()), "utf-8")
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError:
-            pass
+        _atomic_write(self.path, json.dumps(tokens.to_dict()), 0o600)
 
     async def clear(self) -> None:
         self.path.unlink(missing_ok=True)
@@ -83,13 +100,16 @@ class FileCache(MemoryCache):
         super().__init__()
         self.path = Path(path)
         try:
-            self._d = json.loads(self.path.read_text("utf-8"))
+            data = json.loads(self.path.read_text("utf-8"))
         except (OSError, ValueError):
-            self._d = {}
+            data = {}
+        self._d = data if isinstance(data, dict) else {}
 
     def _flush(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self._d, ensure_ascii=False), "utf-8")
+        try:  # кеш — це бонус: помилка диска не має ламати запит
+            _atomic_write(self.path, json.dumps(self._d, ensure_ascii=False))
+        except OSError:
+            pass
 
     async def set(self, key: str, value: Any) -> None:
         self._d[key] = value
@@ -97,4 +117,7 @@ class FileCache(MemoryCache):
 
     async def clear(self) -> None:
         self._d.clear()
-        self.path.unlink(missing_ok=True)
+        try:
+            self.path.unlink(missing_ok=True)
+        except OSError:
+            pass

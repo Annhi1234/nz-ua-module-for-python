@@ -23,11 +23,23 @@ class NZClient:
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True, name="nzua-loop")
+        self._closed = False
+        started = threading.Event()
+
+        def _run_loop() -> None:
+            asyncio.set_event_loop(self._loop)
+            self._loop.call_soon(started.set)
+            self._loop.run_forever()
+
+        self._thread = threading.Thread(target=_run_loop, daemon=True, name="nzua-loop")
         self._thread.start()
+        started.wait(5)
         self._async = AsyncNZClient(*args, **kwargs)
 
     def _run(self, coro):
+        if self._closed:
+            coro.close()
+            raise RuntimeError("NZClient уже закрито")
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
     def __getattr__(self, name: str) -> Any:
@@ -42,10 +54,16 @@ class NZClient:
         return attr
 
     def close(self) -> None:
-        if self._loop.is_running():
+        if self._closed:
+            return
+        try:
             self._run(self._async.aclose())
+        finally:
+            self._closed = True
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._thread.join(timeout=5)
+            if not self._thread.is_alive():
+                self._loop.close()
 
     def __enter__(self) -> "NZClient":
         return self

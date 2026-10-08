@@ -28,7 +28,7 @@ Callback = Callable[..., Any]
 ICONS: dict[str, str] = {
     "book": "✎", "calendar": "▦", "school": "★", "bell": "✉", "person": "☺", "refresh": "↻",
     "logout": "⎋", "left": "‹", "right": "›", "send": "➤", "close": "✕", "check": "✓", "home": "⌂",
-    "settings": "⚙", "chart": "▮", "table": "▦",
+    "settings": "⚙", "chart": "▮", "table": "▦", "search": "⌕", "more": "☰",
 }
 
 
@@ -230,7 +230,7 @@ class Cell:
 
 
 class Table(Widget):
-    """Таблиця з різними стилями комірок.
+    """Таблиця з різними стилями комірок. `min_width` — мінімальна ширина, щоб на телефоні таблиця не стискалась.
 
         Table(["Предмет", Col("Бал", width=60, align="center")],
               [["Алгебра", Cell(11, color="good", bold=True)], ["Фізика", Chip(8)]],
@@ -242,11 +242,13 @@ class Table(Widget):
 
     def __init__(self, columns: Sequence[Col | str], rows: Sequence[Sequence[Any]] = (), *,
                  zebra: bool = True, header: bool = True, empty: str = "Немає даних",
-                 on_row_click: Callable[[int], Any] | None = None, **kw: Any) -> None:
+                 on_row_click: Callable[[int], Any] | None = None, min_width: int | None = None,
+                 **kw: Any) -> None:
         super().__init__(**kw)
         self.columns = [c if isinstance(c, Col) else Col(str(c)) for c in columns]
         self.rows = [list(r) for r in rows]
         self.zebra, self.header, self.empty, self.on_row_click = zebra, header, empty, on_row_click
+        self.min_width = min_width   # вужчий екран → таблиця прокручується вбік (Flet)
 
     @property
     def children(self) -> list[Widget]:
@@ -269,16 +271,22 @@ class Chart(Widget):
 
     def __init__(self, labels: Sequence[str], values: Sequence[float | None], *, type: str = "bar",
                  colors: str | Sequence[str] = "scale", show_values: bool = True, title: str | None = None,
-                 max_value: float = 12, **kw: Any) -> None:
+                 max_value: float = 12, color_values: Sequence[float | None] | None = None, **kw: Any) -> None:
         kw.setdefault("height", 260)
         super().__init__(**kw)
         self.labels, self.values, self.type, self.colors = list(labels), list(values), type, colors
         self.show_values, self.title, self.max_value = show_values, title, max_value
+        self.color_values = list(color_values) if color_values is not None else None  # за якими числами красити «scale»
 
     def svg(self, theme: Any = None, width: int = 640) -> str:
         from ..charts import ChartStyle, bar_chart, line_chart
         p = theme.palette if theme else {"card": "#FFFFFF", "fg": "#1D2433", "line": "#E3E7F0"}
-        st = ChartStyle(width=width, height=max(120, min(self.style.height or 260, 4000)), colors=self.colors,
+        colors = self.colors
+        if colors == "scale" and theme is not None and self.type == "bar":  # кольори оцінок беруться з теми
+            from .style import mark_color
+            src = self.color_values if self.color_values is not None else self.values
+            colors = [mark_color(None if v is None else round(v), theme) for v in src] or "scale"
+        st = ChartStyle(width=width, height=max(120, min(self.style.height or 260, 4000)), colors=colors,
                         background=p["card"], text_color=p["fg"], grid_color=p["line"],
                         show_values=self.show_values, title=self.title, max_value=self.max_value, responsive=True)
         if self.type == "line":
@@ -293,30 +301,41 @@ class NavItem:
     key: str
     label: str
     icon: str = "home"
+    badge: str | int | None = None   # лічильник на значку (напр. непрочитані); 0/None — без бейджа
 
 
 class NavBar(Widget):
-    """Нижня панель вкладок (телефон). `items`: NavItem або (ключ, підпис, значок)."""
+    """Панель вкладок. `items`: NavItem або (ключ, підпис, значок).
+
+    `rail=True` — бокова панель для планшета/комп'ютера (Flet малює NavigationRail; інші бекенди — нижню панель).
+    """
     kind = "navbar"
 
     def __init__(self, items: Sequence[NavItem | tuple], selected: str | None = None, *,
-                 on_change: Callable[[str], Any] | None = None, **kw: Any) -> None:
+                 on_change: Callable[[str], Any] | None = None, rail: bool = False, **kw: Any) -> None:
         super().__init__(**kw)
         self.items = [i if isinstance(i, NavItem) else NavItem(*i) for i in items]
         self.selected = selected if selected is not None else (self.items[0].key if self.items else None)
-        self.on_change = on_change
+        self.on_change, self.rail = on_change, rail
 
 
 class Screen(Widget):
-    """Корінь інтерфейсу: тіло (прокручується) + необов'язкова нижня панель вкладок."""
+    """Корінь інтерфейсу: тіло (прокручується) + необов'язкова панель вкладок.
+
+    `max_width` — на широких екранах тіло центрується й не розтягується далі цієї ширини;
+    `on_swipe("left" | "right")` — жест пальцем по екрану (Flet); `key` — ідентифікатор «сторінки» для анімації переходу.
+    """
     kind = "screen"
 
     def __init__(self, body: Widget | Sequence[Widget], nav: NavBar | None = None, *, scroll: bool = True,
-                 title: str = "", **kw: Any) -> None:
+                 title: str = "", max_width: int | None = None, on_swipe: Callable[[str], Any] | None = None,
+                 key: str = "", **kw: Any) -> None:
         kw.setdefault("padding", (8, 14))
         super().__init__(**kw)
         self.body = body if isinstance(body, Widget) else Column(body)
         self.nav, self.scroll, self.title = nav, scroll, title
+        self.max_width, self.on_swipe = max_width, on_swipe
+        self.key = key   # зміна ключа між перемальовуваннями = «перехід» (Flet програє м'яку анімацію появи)
 
     @property
     def children(self) -> list[Widget]:

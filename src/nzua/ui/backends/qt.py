@@ -138,6 +138,16 @@ class QtBackend(Backend):
         self._layout = QtWidgets.QVBoxLayout(self.win)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
+        backend = self
+
+        class _ResizeWatcher(QtCore.QObject):   # адаптивна розкладка: повідомляє про розмір вікна
+            def eventFilter(self, obj, ev):  # noqa: N802
+                if ev.type() == QtCore.QEvent.Resize and backend.app is not None:
+                    backend.app.set_size(obj.width(), obj.height())
+                return False
+
+        self._watcher = _ResizeWatcher(self.win)
+        self.win.installEventFilter(self._watcher)
         self.win.show()
         QtCore.QTimer.singleShot(0, app._ready)
         for fn in self._pending:  # виклики, зроблені до запуску вікна

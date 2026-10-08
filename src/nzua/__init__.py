@@ -11,7 +11,7 @@ from .storage import (FileCache, FileTokenStore, MemoryCache, MemoryTokenStore,
                       ResponseCache, TokenStore)
 from .sync import NZClient
 
-__version__ = "3.0.0"
+__version__ = "3.2.0"
 __all__ = ["AsyncNZClient", "NZClient", "BASE_URL", "errors", "models", "load_network_options", "save_network_options", "analytics", "charts", "ChartStyle", "PALETTES", "bar_chart", "line_chart",
            "averages_chart", "marks_chart", "distribution_chart", "save_svg", "needed_marks",
            "rank_subjects", "mark_distribution", "trend", "TokenStore",

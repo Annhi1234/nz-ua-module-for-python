@@ -111,12 +111,23 @@ class TkBackend(Backend):
         self.win.minsize(320, 480)
         self._family = tkfont.nametofont("TkDefaultFont").actual("family")
         self.win.protocol("WM_DELETE_WINDOW", self.quit)
+        self._resize_job: Any = None
+        self.win.bind("<Configure>", self._on_configure, add="+")   # адаптивна розкладка
         self.win.after(25, self._poll)
         self.win.after(0, app._ready)
         try:
             self.win.mainloop()
         finally:
             self._bridge.close()
+
+    def _on_configure(self, e: Any) -> None:
+        """Повідомляє застосунок про новий розмір вікна (із затримкою, щоб не перемальовувати на кожен піксель)."""
+        if e.widget is not self.win or self.win is None:
+            return
+        if self._resize_job is not None:
+            self.win.after_cancel(self._resize_job)
+        w, h = e.width, e.height
+        self._resize_job = self.win.after(150, lambda: self.app.set_size(w, h) if self.app else None)
 
     def quit(self) -> None:
         if self.win is not None:

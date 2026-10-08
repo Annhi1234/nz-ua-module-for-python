@@ -149,6 +149,10 @@ class App:
         self.root: Widget | None = None
         self.dialog: Dialog | None = None
         self.on_start: Callable[["App"], None] | None = None  # викликається, коли вікно готове
+        self.width, self.height = size        # поточний розмір вікна/екрана; оновлюється бекендом
+        self.animations = True                # бекенд може програвати плавні переходи між екранами
+        self.system_dark = False              # системна темна тема (бекенд оновлює через set_system_dark)
+        self.on_back: Callable[[], bool] | None = None  # «назад»: True — подію оброблено
 
     # — запуск —
     def run(self) -> None:
@@ -166,6 +170,40 @@ class App:
             except Exception as e:  # noqa: BLE001
                 self.handle_error(e)
         self.refresh()
+
+    # — адаптивність —
+    COMPACT_MAX = 600    # вужче — телефон (одна колонка, нижня панель)
+    MEDIUM_MAX = 1000    # вужче — планшет; ширше — комп'ютер
+
+    @property
+    def layout(self) -> str:
+        """\"compact\" (телефон) | \"medium\" (планшет) | \"wide\" (комп'ютер) — за поточною шириною."""
+        w = self.width
+        return "compact" if w < self.COMPACT_MAX else "medium" if w < self.MEDIUM_MAX else "wide"
+
+    @property
+    def compact(self) -> bool:
+        return self.layout == "compact"
+
+    def set_size(self, width: float, height: float) -> None:
+        """Бекенд повідомляє новий розмір; перемальовування — лише коли змінився клас розкладки."""
+        before = self.layout
+        self.width, self.height = int(width), int(height)
+        if self.layout != before:
+            self.refresh()
+
+    def set_system_dark(self, dark: bool) -> None:
+        """Бекенд повідомляє, чи в системі ввімкнена темна тема (режим «Як у системі»)."""
+        if bool(dark) != self.system_dark:
+            self.system_dark = bool(dark)
+            self.refresh()
+
+    def back(self) -> bool:
+        """Кнопка «назад»: спершу закриває діалог, потім викликає `on_back`. Повертає True, якщо щось закрито."""
+        if self.dialog is not None:
+            self.close_dialog()
+            return True
+        return bool(self.on_back and self.on_back())
 
     # — стан —
     def update(self, **changes: Any) -> None:

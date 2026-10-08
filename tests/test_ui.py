@@ -155,7 +155,9 @@ def test_diary_app_full_flow(tmp_path):
     d = DiaryApp(DemoClient(), backend="headless", settings=Settings.load(tmp_path / "ui.json"))
     d.app.run()
     b = d.app.backend
-    assert any("жовтня" in t or "Понеділок" in t for t in b.texts())
+    assert d.app.state["diary_view"] == "today" and b.root.find("hero") is not None   # стартує «Сьогодні»
+    b.click("dv-lessons")
+    assert any(sc.fmt_day(d.selected_day()) in t for t in b.texts())
     for tab in ("timetable", "grades", "notes", "profile", "diary"):
         b.click("nav", tab)
         assert d.app.state["error"] == ""
@@ -239,3 +241,173 @@ def test_unknown_backend_and_auto_error():
     from nzua.ui import get_backend
     with pytest.raises(ValueError):
         get_backend("nope")
+
+
+# ── адаптивність, теми й нові функції ──
+def test_theme_scaling_and_make_theme():
+    from nzua.ui import ACCENTS, make_theme
+    th = make_theme("amoled", "teal", font_scale=1.5, density="compact", radius=20, stripe=False,
+                    mark_scheme="colorblind")
+    assert th.dark and th.palette["bg"] == "#000000" and th.palette["ink"] == ACCENTS["teal"][2]
+    assert th.resolve("text", "h1").color == th.palette["ink"]      # похідні стилі перефарбовано
+    assert th.resolve("text", "h1").font_size == round(NOTEBOOK.resolve("text", "h1").font_size * 1.5)
+    assert th.resolve("card").radius == 20 and th.resolve("card").border_left == ""
+    assert th.palette["good"] == "#0072B2"
+    assert NOTEBOOK.resolve("text", "h1").font_size == 34   # оригінал не чіпається
+    assert make_theme(font_scale=9).font_scale == 1.6
+
+
+def test_app_layout_classes():
+    a = App(lambda app: Text("x"), backend="headless", size=(400, 800))
+    assert a.layout == "compact" and a.compact
+    a.set_size(800, 600)
+    assert a.layout == "medium"
+    a.set_size(1400, 900)
+    assert a.layout == "wide" and not a.compact
+
+
+def test_settings_validation_and_migration(tmp_path):
+    p = tmp_path / "ui.json"
+    p.write_text(json.dumps({"dark": True, "font_scale": 9, "radius": "x", "accent": "nope", "done": [1, "a"]}))
+    s = Settings.load(p)
+    assert s.mode == "dark" and s.dark and s.font_scale == 1.6 and s.radius == 12 and s.accent == "indigo"
+    assert s.done == ["a"]
+    s.dark = False
+    s.reset()
+    assert s.mode == "light" and s.done == ["a"]
+
+
+def test_period_range():
+    from datetime import date
+    from nzua.ui.diary import period_range
+    t = date(2026, 10, 8)
+    assert period_range("week", t)[0] == date(2026, 10, 5)
+    assert period_range("month", t)[0] == date(2026, 10, 1)
+    assert period_range("semester", t)[0] == date(2026, 9, 1)
+    assert period_range("semester", date(2026, 3, 1))[0] == date(2026, 1, 1)
+    assert period_range("year", date(2026, 3, 1))[0] == date(2025, 9, 1)
+
+
+@pytest.mark.parametrize("width", [360, 800, 1400])
+def test_diary_adaptive_flow(tmp_path, width):
+    st = Settings.load(tmp_path / "ui.json")
+    d = DiaryApp(DemoClient(), backend="headless", settings=st)
+    d.app.width = width
+    d.app.run()
+    b = d.app.backend
+    # Д/з: список, позначка «виконано», збереження
+    assert b.root.find("hero") is not None and b.root.find("week-gauge") is not None
+    b.click("dv-homework")
+    assert any("Виконано 0 з" in t for t in b.texts())
+    b.click("hw-0")
+    assert len(st.done) == 1 and any("Виконано 1 з" in t for t in b.texts())
+    assert Settings.load(tmp_path / "ui.json").done == st.done
+    b.type("only_open", True)
+    b.click("dv-marks")
+    b.click("dv-lessons")
+    # оцінки: калькулятор цілі, пошук, сортування, період
+    b.click("nav", "grades")
+    b.click("performance-table", 0)
+    assert any("Ціль" in w.text or "Потрібно" in w.text or "досягти" in w.text
+               for w in b.dialog.walk() if hasattr(w, "text"))
+    b.type("target", "12")
+    assert b.dialog is not None
+    b.click("wi-4")   # «що, якщо»
+    assert b.dialog.find("whatif-result") is not None
+    b.click("wi-reset")
+    assert b.dialog.find("whatif-result") is None
+    b.type("target", "9")
+    b.click("set-goal")   # зберегти ціль
+    assert list(st.goals.values()) == [9.0]
+    b.click("dlg-close")
+    b.type("grades_sort", "avg_desc")
+    b.type("grades_period", "month")
+    assert st.grades_sort == "avg_desc" and st.grades_period == "month"
+    b.type("subject_q", "Ал", submit=True)
+    assert d.app.state["query"] == "Ал"
+    # налаштування: тема, масштаб, кнопка «назад», скидання
+    b.click("nav", "profile")
+    b.click("open-settings")
+    b.type("mode", "amoled")
+    b.type("font_scale", 1.4)
+    b.click("accent-teal")
+    assert d.app.theme.dark and d.app.theme.font_scale == 1.4 and st.accent == "teal"
+    assert d.app.back()
+    b.settle()
+    assert d.app.state["sub"] == ""
+    b.click("open-settings")
+    b.click("reset-settings")
+    b.click("dlg-reset")
+    assert st.mode == "light" and st.font_scale == 1.0 and not d.app.theme.dark
+
+
+def test_day_navigation_and_day_strip(tmp_path):
+    from datetime import timedelta
+    d = DiaryApp(DemoClient(), backend="headless", settings=Settings.load(tmp_path / "ui.json"))
+    d.app.run()
+    b = d.app.backend
+    b.click("dv-lessons")
+    assert d.day_mode()                      # телефон → по днях
+    d0 = d.selected_day()
+    b.click(f"day-{(d.monday()).isoformat()}")
+    assert d.selected_day() == d.monday()
+    d.shift_day(-1)                          # за межу тижня → попередній тиждень
+    b.settle()
+    assert d.app.state["week"] == -1 and d.selected_day() == d.monday() + timedelta(days=6)
+    d.move_week(0)
+    b.settle()
+    assert d.selected_day() == d0
+    d.settings.diary_mode = "week"
+    assert not d.day_mode()
+
+
+def test_screens_helpers():
+    from datetime import date
+    strip = sc.day_strip(date(2026, 10, 5), date(2026, 10, 7), lambda d: None, today=date(2026, 10, 7))
+    assert len(strip.children) == 7 and strip.find("day-2026-10-07") is not None
+    seg = sc.segmented([("a", "A"), ("b", "B")], "a", lambda k: None, id_prefix="s")
+    assert seg.find("s-a").variant == "primary" and seg.find("s-b").variant == "outline"
+    assert sc.trend_arrow([5, 6, 8, 10, 12]) == "↗" and sc.trend_arrow([12, 10, 8, 6, 4]) == "↘"
+    j = sc.journal_table(Schedule.model_validate(DIARY) if hasattr(Schedule, "model_validate") else Schedule.from_api(DIARY))
+    assert j.min_width and j.min_width >= 150
+
+
+def test_new_helpers_gauge_sparkline_text_skeleton():
+    g = sc.gauge_svg(9.5, 12, color="#2E7D32")
+    assert g.startswith("<svg") and "9.5" in g and sc.gauge_svg(None).count("—") == 1
+    xml.parseString(g)
+    sp = sc.sparkline_svg([5, 7, 9, 12], 120, 32)
+    xml.parseString(sp)
+    assert sc.sparkline_svg([5]) == ""
+    assert sc.first_name("Іваненко Петро Олегович") == "Петро" and sc.first_name("Петро") == "Петро"
+    assert sc.greeting(__import__("datetime").time(8)) == "Доброго ранку"
+    assert len(sc.skeleton(2)) == 2
+    sched = Schedule.model_validate(DIARY) if hasattr(Schedule, "model_validate") else Schedule.from_api(DIARY)
+    txt = sc.homework_text(sched)
+    assert isinstance(txt, str) and txt
+
+
+def test_subject_colors_and_custom_accent():
+    from nzua.ui import make_theme
+    from nzua.ui.style import subject_key
+    assert subject_key("Алгебра") == subject_key(" алгебра ") and subject_key("Алгебра") in NOTEBOOK.palette
+    assert NOTEBOOK.palette["subj0"] != DARK.palette["subj0"]
+    th = make_theme("light", "custom", accent_hex="#FF5722", shadows=False)
+    assert th.palette["ink"] == "#FF5722" and th.resolve("card").shadow is None
+    assert make_theme("light").resolve("card").shadow == 1
+
+
+def test_settings_backup_and_custom_accent_flow(tmp_path):
+    st = Settings.load(tmp_path / "ui.json")
+    d = DiaryApp(DemoClient(), backend="headless", settings=st)
+    d.app.run()
+    b = d.app.backend
+    b.click("nav", "profile")
+    b.click("open-settings")
+    b.type("accent_hex", "#00AA88", submit=True)
+    assert st.accent == "custom" and st.accent_hex == "#00AA88" and d.app.theme.palette["ink"] == "#00AA88"
+    b.click("backup-settings")
+    assert b.dialog.find("backup-json") is not None
+    b.type("backup_in", '{"font_scale": 1.2, "mode": "dark"}')
+    b.click("dlg-apply")
+    assert st.font_scale == 1.2 and st.mode == "dark"
